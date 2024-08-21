@@ -14,7 +14,9 @@ python recovery.py -v --image-file start1.img --image-file start4.img --image-fi
 - RAID5 set ordering:
 python recovery.py -v --image-file start1.img --image-file start4.img --image-file start7.img --image-file start8.img --nproc=4 --page-range=400-600 order --page-size=256
 
-- RAID5 rconstruction:
+- RAID5 reconstruction:
+python recovery.py -v --image-file start4.img --image-file start8.img --image-file start1.img --image-file start7.img --page-range=0-200 restore --page-size=256 --output-filename=test.img
+
 '''
 
 import os
@@ -30,7 +32,14 @@ import multiprocessing as mp
 import numpy as np
 from tqdm import tqdm
 
-def parse_range(rangestr):
+
+class ArgumentException(Exception):
+    pass
+
+class GenericException(Exception):
+    pass
+
+def _parse_range(rangestr):
     result = []
     try:
         for r in filter(None, rangestr.split(',')):
@@ -42,20 +51,15 @@ def parse_range(rangestr):
             else:
                 result += [int(r)]
     except ValueError:
-        print('Error: page ranges must be numeric')
-        sys.exit(2)
+        raise ArgumentException('Error: page ranges must be numeric')
     return result
             
 
-def read(fname, pagesize, page, numpy=True):
+def read_page(fname, pagesize, page):
     with open(fname, 'rb') as f:
         f.seek(page * pagesize)
         byt = f.read(pagesize)
-      
-    if numpy:
         return np.frombuffer(byt, dtype=np.uint8)
-    else:
-        return byt
 
 
 def parity_check(data_chunks):
@@ -68,9 +72,9 @@ def guess_set(fnames, ndisks, pagesize, pages, verbose=False, test_all=False):
     '''Guess which image files are part of a RAID5 sets, looking for matching parity data'''
 
     detected = defaultdict(list)
-    for page in _nextpage(fnames, pagesize, pages):
+    for page in tqdm(pages):
         for comb in itertools.combinations(fnames, ndisks):
-            data = [read(fname, pagesize, page) for fname in comb]
+            data = [read_page(fname, pagesize, page) for fname in comb]
             check = parity_check(data)
             if verbose:
                 print('Trying:', comb, 'Page:', page, 'Result:', 'Match' if check else 'No match')
@@ -98,27 +102,13 @@ def raid5_stripes(ndisks, page_index, start=0):
     return stripes
 
 
-def _nextpage(fnames, pagesize, pages):
-    if len(pages) > 0:
-        for page in pages:
-            yield page
-        return
-
-    if isinstance(fnames, str):
-        fnames = [fnames]
-    sizes = [os.path.getsize(fname) for fname in fnames]
-    npages = min(sizes) // pagesize
-    for page in range(npages):
-        yield page
-
-
 def test_parity(fnames, pagesize, pages, verbose=False):
 
     passed = True
     ndisks = len(fnames)
-    for page in _nextpage(fnames, pagesize, pages):
+    for page in pages:
         stripes = np.array(raid5_stripes(ndisks, page))
-        data = [read(fname, pagesize, page) for fname in fnames]
+        data = [read_page(fname, pagesize, page) for fname in fnames]
         check = parity_check(data)
         if verbose:
             print(f'Page {page}: parity check', 'passed' if check else 'FAILED')
@@ -131,25 +121,20 @@ def restore(fnames, pagesize_kB, pages, output_filename):
 
     ndisks = len(fnames)
     pagesize = pagesize_kB * 1024
-    if len(pages) == 0:
-        totlen = os.path.getsize(fname) // pagesize
-    else:
-        totlen = len(pages)
-
     with open(output_filename, 'wb') as f:
-        for page in tqdm(_nextpage(fnames, pagesize, pages), total=totlen, desc='Restoring image'):
+        for page in tqdm(pages, desc='Restoring image'):
             stripes = np.array(raid5_stripes(ndisks, page))
-            data = [read(fname, pagesize, page) for fname in fnames]
+            data = [read_page(fname, pagesize, page) for fname in fnames]
             if not parity_check(data):
-                print(f'Parity check failed for page {page}')
+                raise GenericException(f'Parity check failed for page {page}')
 
-            sorted_idxs = np.argsort(stripes[np.where(stripes != -1)[0]])
+            sorted_idxs = np.argsort(stripes)[1:]  # First one is the parity (value -1)
             for idx in sorted_idxs:
                 f.write(data[idx])
 
 
 def _is_ascii(page, fname, pagesize):
-    data = read(fname, pagesize, page)
+    data = read_page(fname, pagesize, page)
     if data.sum() == 0:
         return '0'
     else:
@@ -163,24 +148,23 @@ def _find_parity_page(fname, ndisks, page_size_kB, pages, nproc=1, msg=''):
     pagesize = page_size_kB * 1024
     with mp.Pool(nproc) as p:
         my_is_ascii = functools.partial(_is_ascii, fname=fname, pagesize=pagesize)
-        if len(pages) == 0:
-            totlen = os.path.getsize(fname) // pagesize
-        else:
-            totlen = len(pages)
-        flags = list(tqdm(p.imap(my_is_ascii, _nextpage(fname, pagesize, pages)), total=totlen, desc=msg))
+        flags = list(tqdm(p.imap(my_is_ascii, pages), total=len(pages), desc=msg))
     allflags = ''.join(flags)
     search_flags = ['1'] * (ndisks - 1) + ['0']
     search_pattern = ''.join(search_flags * 2)
     return allflags.find(search_pattern)
 
 
-def guess_pagesize(fnames, array_size, pages, nproc=1):
+def guess_pagesize(fnames, array_size, nproc=1):
     '''
     Guess pagesize based on ASCII patterns.
     '''
     sizesKB = [1024, 512, 256, 128, 64]
     ndisks = array_size
     for szKB in sizesKB:
+        # Recalc number of pages
+        size = os.path.getsize(fnames[0])
+        pages = list(range(size // (szKB * 1024)))
         index = _find_parity_page(fnames[0], ndisks, szKB, pages, nproc, msg=f'Trying {szKB}KB')
         if index >= 0:
             print(f'Pagesize is {szKB}KB')
@@ -197,8 +181,7 @@ def guess_order(fnames, pagesize_kB, pages, nproc=1, verbose=False):
     for fname in fnames:
         idx = _find_parity_page(fname, ndisks, pagesize_kB, pages, nproc, msg=f'Looking into {fname}')
         if idx == -1:
-            print('Page search failed')
-            sys.exit(1)
+            raise GenericException('Page search failed')
         parity_idx.append(idx + ndisks -1) 
 
     for i in range(len(parity_idx)):
@@ -207,63 +190,68 @@ def guess_order(fnames, pagesize_kB, pages, nproc=1, verbose=False):
     order = [''] * ndisks
     for i, idx in enumerate(parity_idx):
         order[idx] = fnames[i]
-    return order
+    return order[::-1]    # We found parity, image order is the inverse
+
+def calc_page_range(page_range, page_size, fnames):
+    pages = _parse_range(page_range)
+    if len(pages) == 0:
+        sizes = [os.path.getsize(fname) for fname in fnames]
+        npages = min(sizes) // (page_size * 1024)
+        pages = list(range(npages))
+    return pages
 
 
 def main(args):
 
+    # Handle input image files / patterns
     if args.image_file_pattern:
         if args.image_file:
-            print('Only one between --image-file-pattern and --image-file can be specified')
-            sys.exit(2)
+            raise ArgumentException('Only one between --image-file-pattern and --image-file can be specified')
         fnames = sorted(glob.glob(args.image_file_pattern))
     elif args.image_file:
         fnames = args.image_file
     else:
-        print('At least one of --image-file-pattern and --image-file must be specified')
-        sys.exit(2)
+        raise ArgumentException('At least one of --image-file-pattern and --image-file must be specified')
 
-    pages = parse_range(args.page_range)
+    # Parse page ranges
+    pages = _parse_range(args.page_range)
+    if len(pages) == 0 and hasattr(args, 'page_size'):
+        sizes = [os.path.getsize(fname) for fname in fnames]
+        npages = min(sizes) // (page_size * 1024)
+        pages = list(range(npages))
 
+    # Handle subcommands
     if args.subcommand == 'pagesize':
-        guess_pagesize(fnames, args.array_size, pages, nproc=args.nproc)
-        sys.exit(0)
+        guess_pagesize(fnames, args.array_size, nproc=args.nproc)
 
-    if args.subcommand == 'paritycheck':
+    elif args.subcommand == 'paritycheck':
         pagesize = args.page_size
         if len(fnames) < 3:
-            print('Error: need at least 3 image files for parity check')
-            sys.exit(2)
+            raise ArgumentException('Error: need at least 3 image files for parity check')
         test_parity(fnames, pagesize * 1024, pages, verbose=args.verbose)
-        sys.exit(0)
 
-    if args.subcommand == 'raidset':
+    elif args.subcommand == 'raidset':
         pagesize = args.page_size
         ndisks = args.array_size
         if len(fnames) < ndisks:
-            print(f'Not enough image files for array-size={ndisks} (only {len(files)} given)')
+            raise ArgumentException(f'Not enough image files for array-size={ndisks} (only {len(fnames)} given)')
         detected = guess_set(fnames, ndisks, pagesize * 1024, pages, verbose=args.verbose, test_all=args.test_all)
         if len(detected) == 0:
             print('No RAID5 set detected')
         else:
             for raidset in detected:
                 print('Detected RAID5 set:', raidset)
-        sys.exit(0)
 
-    if args.subcommand == 'order':
+    elif args.subcommand == 'order':
         pagesize = args.page_size
         order = guess_order(fnames, pagesize, pages, nproc=args.nproc, verbose=args.verbose)
-        print('Guess order is', order)
-        sys.exit(0)
+        print('Guessed order is', order)
 
-    if args.subcommand == 'restore':
+    elif args.subcommand == 'restore':
         pagesize = args.page_size
         if os.path.exists(args.output_filename):
-            print(f'{args.output_filename} already exist, nothing done')
-            sys.exit(1)
+            raise GenericException(f'{args.output_filename} already exist, nothing done')
         restore(fnames, pagesize, pages, args.output_filename)
-        sys.exit(0)
-
 
 
 if __name__ == '__main__':
@@ -297,4 +285,14 @@ if __name__ == '__main__':
     parser_restore.add_argument('--output-filename', type=str, required=True, help='Output filename')
 
     args = parser.parse_args(sys.argv[1:])
-    main(args)
+    try:
+        main(args)
+    except ArgumentException as e:
+        print(e)
+        sys.exit(2)
+    except GenericException as e:
+        print(e)
+        sys.exit(1)
+
+# __oOo__
+
