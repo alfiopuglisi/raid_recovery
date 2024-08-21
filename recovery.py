@@ -9,7 +9,12 @@ python recovery.py --nproc=4 -v --image-file start1.img pagesize --array-size=4
 python recovery.py -v --image-file-pattern "start?.img" --page-range=900-1024 raidset --array-size 4 --test-all --page-size=256
 
 - Parity check of multiple image files:
-python recovery.py -v --image-file start1.img --image-file start4.img --image-file start7.img  --image-file start8.img  paritycheck --page-size=256
+python recovery.py -v --image-file start1.img --image-file start4.img --image-file start7.img --image-file start8.img  paritycheck --page-size=256
+
+- RAID5 set ordering:
+python recovery.py -v --image-file start1.img --image-file start4.img --image-file start7.img --image-file start8.img --nproc=4 --page-range=400-600 order --page-size=256
+
+- RAID5 rconstruction:
 '''
 
 import os
@@ -46,16 +51,11 @@ def read(fname, pagesize, page, numpy=True):
     with open(fname, 'rb') as f:
         f.seek(page * pagesize)
         byt = f.read(pagesize)
+      
     if numpy:
         return np.frombuffer(byt, dtype=np.uint8)
     else:
         return byt
-
-
-def write(prefix, pagesize, page, output_filename):
-    data = read(prefix, pagesize, page)
-    with open(output_filename, 'ab') as f:
-        f.write(data)
 
 
 def parity_check(data_chunks):
@@ -68,7 +68,7 @@ def guess_set(fnames, ndisks, pagesize, pages, verbose=False, test_all=False):
     '''Guess which image files are part of a RAID5 sets, looking for matching parity data'''
 
     detected = defaultdict(list)
-    for page in nextpage(fnames, pagesize, pages):
+    for page in _nextpage(fnames, pagesize, pages):
         for comb in itertools.combinations(fnames, ndisks):
             data = [read(fname, pagesize, page) for fname in comb]
             check = parity_check(data)
@@ -89,7 +89,6 @@ def guess_set(fnames, ndisks, pagesize, pages, verbose=False, test_all=False):
 
 def raid5_stripes(ndisks, page_index, start=0):
     '''raid5 stripe arrangment for the given page index.
-
     The parity stripe is marked as -1'''
     stripes = [-1] * ndisks
     offset = page_index % ndisks
@@ -99,22 +98,25 @@ def raid5_stripes(ndisks, page_index, start=0):
     return stripes
 
 
-def nextpage(fnames, pagesize, pages):
+def _nextpage(fnames, pagesize, pages):
     if len(pages) > 0:
         for page in pages:
             yield page
         return
 
+    if isinstance(fnames, str):
+        fnames = [fnames]
     sizes = [os.path.getsize(fname) for fname in fnames]
     npages = min(sizes) // pagesize
     for page in range(npages):
         yield page
 
+
 def test_parity(fnames, pagesize, pages, verbose=False):
 
     passed = True
     ndisks = len(fnames)
-    for page in nextpage(fnames, pagesize, pages):
+    for page in _nextpage(fnames, pagesize, pages):
         stripes = np.array(raid5_stripes(ndisks, page))
         data = [read(fname, pagesize, page) for fname in fnames]
         check = parity_check(data)
@@ -125,20 +127,28 @@ def test_parity(fnames, pagesize, pages, verbose=False):
     print(f'Parity check ', 'passed' if check else 'FAILED')
 
 
-def restore(prefixes, pagesize, npages, output_filename):
+def restore(fnames, pagesize_kB, pages, output_filename):
 
-    ndisks = len(prefixes)
-    for page in tqdm(range(npages)):
-        stripes = np.array(raid5_stripes(ndisks, page))
-        data = [read(prefix, pagesize, page) for prefix in prefixes]
-        if not parity_check(data):
-            print(f'Parity check failed for page {page}')
+    ndisks = len(fnames)
+    pagesize = pagesize_kB * 1024
+    if len(pages) == 0:
+        totlen = os.path.getsize(fname) // pagesize
+    else:
+        totlen = len(pages)
 
-        sorted_idxs = np.argsort(stripes[np.where(stripes != -1)[0]])
-        for prefix in np.array(prefixes)[sorted_idxs]:
-            write(prefix, pagesize, page, output_filename)
+    with open(output_filename, 'wb') as f:
+        for page in tqdm(_nextpage(fnames, pagesize, pages), total=totlen, desc='Restoring image'):
+            stripes = np.array(raid5_stripes(ndisks, page))
+            data = [read(fname, pagesize, page) for fname in fnames]
+            if not parity_check(data):
+                print(f'Parity check failed for page {page}')
 
-def ff(page, fname, pagesize):
+            sorted_idxs = np.argsort(stripes[np.where(stripes != -1)[0]])
+            for idx in sorted_idxs:
+                f.write(data[idx])
+
+
+def _is_ascii(page, fname, pagesize):
     data = read(fname, pagesize, page)
     if data.sum() == 0:
         return '0'
@@ -146,36 +156,58 @@ def ff(page, fname, pagesize):
         uniq = len(np.unique(data))
         return '1' if uniq < 80 else '0'
 
+
+def _find_parity_page(fname, ndisks, page_size_kB, pages, nproc=1, msg=''):
+
+    flags = []
+    pagesize = page_size_kB * 1024
+    with mp.Pool(nproc) as p:
+        my_is_ascii = functools.partial(_is_ascii, fname=fname, pagesize=pagesize)
+        if len(pages) == 0:
+            totlen = os.path.getsize(fname) // pagesize
+        else:
+            totlen = len(pages)
+        flags = list(tqdm(p.imap(my_is_ascii, _nextpage(fname, pagesize, pages)), total=totlen, desc=msg))
+    allflags = ''.join(flags)
+    search_flags = ['1'] * (ndisks - 1) + ['0']
+    search_pattern = ''.join(search_flags * 2)
+    return allflags.find(search_pattern)
+
+
 def guess_pagesize(fnames, array_size, pages, nproc=1):
+    '''
+    Guess pagesize based on ASCII patterns.
+    '''
     sizesKB = [1024, 512, 256, 128, 64]
     ndisks = array_size
-    search_flags = ['1'] * (ndisks-1) + ['0']
-    search_pattern = ''.join(search_flags * 2)
     for szKB in sizesKB:
-        flags = []
-        pagesize = szKB * 1024
-        with mp.Pool(nproc) as p:
-            myff = functools.partial(ff, fname=fnames[0], pagesize=pagesize)
-            if len(pages) == 0:
-                totlen = os.path.getsize(fnames[0]) // pagesize
-            else:
-                totlen = len(pages)
-            flags = list(tqdm(p.imap(myff, nextpage([fnames[0]], pagesize, pages)), total=totlen, desc=f'Trying {szKB}KB'))
-        allflags = ''.join(flags)
-
-        if allflags.find(search_pattern) > 0:
+        index = _find_parity_page(fnames[0], ndisks, szKB, pages, nproc, msg=f'Trying {szKB}KB')
+        if index >= 0:
             print(f'Pagesize is {szKB}KB')
             return szKB
     print('No pagesize found')
-    return None
                
 
-def find_subarray(arr, subarr):
-    sz = len(subarr)
-    for pos in range(len(arr) - len(subarr) + 1):
-        if np.array_equal(arr[pos : pos + sz], subarr):
-            return pos
-    return -1
+def guess_order(fnames, pagesize_kB, pages, nproc=1, verbose=False):
+    '''
+    Guess RAID image ordering based on ASCII patterns.
+    '''
+    ndisks = len(fnames)
+    parity_idx = []
+    for fname in fnames:
+        idx = _find_parity_page(fname, ndisks, pagesize_kB, pages, nproc, msg=f'Looking into {fname}')
+        if idx == -1:
+            print('Page search failed')
+            sys.exit(1)
+        parity_idx.append(idx + ndisks -1) 
+
+    for i in range(len(parity_idx)):
+        parity_idx[i] %= ndisks
+
+    order = [''] * ndisks
+    for i, idx in enumerate(parity_idx):
+        order[idx] = fnames[i]
+    return order
 
 
 def main(args):
@@ -220,19 +252,16 @@ def main(args):
 
     if args.subcommand == 'order':
         pagesize = args.page_size
-        order = guess_order(fnames, pagesize, page, args.example_file, verbose=args.verbose)    
+        order = guess_order(fnames, pagesize, pages, nproc=args.nproc, verbose=args.verbose)
         print('Guess order is', order)
         sys.exit(0)
 
     if args.subcommand == 'restore':
         pagesize = args.page_size
-        ndisks = args.array_size
-        order = args.order
         if os.path.exists(args.output_filename):
             print(f'{args.output_filename} already exist, nothing done')
             sys.exit(1)
-        page_len = 4096
-        restore(files[order], pagesize, page_len, args.output_filename)
+        restore(fnames, pagesize, pages, args.output_filename)
         sys.exit(0)
 
 
@@ -261,13 +290,10 @@ if __name__ == '__main__':
     parser_raidset.add_argument('--test-all', action='store_true', help='Test all possible combinations')
 
     parser_order = subp.add_parser('order', help='Guess RAID image set')
-    parser_order.add_argument('--array-size', type=int, required=True, help='RAID array size (number of disks)')
     parser_order.add_argument('--page-size', type=int, required=True, default=None, help='Page size in KB')
-    parser_order.add_argument('--example-file', type=str, default=None, help='Known example file')
 
     parser_restore = subp.add_parser('restore', help='Restore disk image')
     parser_restore.add_argument('--page-size', type=int, required=True, default=None, help='Page size in KB')
-    parser_restore.add_argument('--order', type=int, action='append', required=True, help='Ordering of input image files')
     parser_restore.add_argument('--output-filename', type=str, required=True, help='Output filename')
 
     args = parser.parse_args(sys.argv[1:])
