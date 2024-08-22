@@ -217,7 +217,7 @@ def main(args):
     pages = _parse_range(args.page_range)
     if len(pages) == 0 and hasattr(args, 'page_size'):
         sizes = [os.path.getsize(fname) for fname in fnames]
-        npages = min(sizes) // (page_size * 1024)
+        npages = min(sizes) // (args.page_size * 1024)
         pages = list(range(npages))
 
     # Handle subcommands
