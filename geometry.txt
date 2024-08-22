@@ -1,0 +1,12 @@
+
+# Warning: the actual image end is 7630885.3359375 MB that corresponds to 7814026584.0 KB
+
+# id  RAID_idx   file img     start MB  end MB
+0        0       disk4a.img   0         4813759
+1        0       disk4b.img   4813759   7630885.3359375
+2        1       disk8a.img   0         7630885.3359375
+3        2       disk1a.img   0         2549811
+4        2       disk1b.img   2549811   7630885.3359375
+5        3       disk7a.img   0         1651088
+6        3       disk7b.img   1651088   7630885.3359375
+
