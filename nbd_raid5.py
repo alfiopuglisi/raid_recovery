@@ -20,8 +20,7 @@ geometry_file = None
 pagesizeKB = -1
 
 API_VERSION = 2
-logfile = 'raid5.log'
-logfd = open(logfile, 'w')
+
 
 def config(key, value):
     global geometry_file
@@ -60,29 +59,27 @@ def pread(h, buf, offset, flags):
     end_page = (offset + len(buf)) // raidpagesize + 1 
     mod_page = offset % raidpagesize
     pos = 0
-    logfd.write('%08x %04x: pos=%d start_page=%d end_page=%d mod_page=%d\n' % (offset, len(buf), pos, start_page, end_page, mod_page))
     for page in range(start_page, end_page):
-        # Image files are at multiples of page size, so there is no need to split reads
         stripes = raid5_stripes(ndisks, page)  # RAID stripes ordering in given page
-        sorted_idxs =np.argsort(stripes)[1:]   # sorted RAID disks to read, excluding parity
+        sorted_idxs = np.argsort(stripes)[1:]   # sorted RAID disks to read, excluding parity
 
-        # Read stripes in order
         pageKB = page * pagesizeKB  # Page KB address on the single disk
 
+        # Read stripes in order
         mybuf = []
         for raid_idx in sorted_idxs:
             for image in geometry:
                 if image.raid_index == raid_idx and image.startKB <= pageKB and image.endKB > pageKB:
+                    # Image files are at multiples of page size,
+                    # so there is no need to split reads
                     myoffset = pageKB - image.startKB
                     fd[image.id].seek(myoffset * 1024)
                     mybuf.append(fd[image.id].read(pagesizeKB * 1024))
-                    logfd.write('%08x %04x: pos=%d start_page=%d end_page=%d mod_page=%d, page=%d, raid_idx=%d myoffset=%d\n' % (offset, len(buf), pos, start_page, end_page, mod_page, page, raid_idx, myoffset*1024))
-                    logfd.flush()
+
+        # Assemble full RAID page and cut start and end if needed
         mybuf = b''.join(mybuf)
         mybuf = mybuf[mod_page:]
 
-        #import code
-        #code.interact(local=dict(globals(), **locals()))
         if pos + len(mybuf) > len(buf):
             mylen = len(buf) - pos
         else:
@@ -90,14 +87,8 @@ def pread(h, buf, offset, flags):
         if mylen == 0:
             break
         buf[pos : pos + mylen] = mybuf[:mylen]
-        logfd.write('%08x %04x: pos=%d start_page=%d end_page=%d mod_page=%d, mylen=%d\n' % (offset, len(buf), pos, start_page, end_page, mod_page, mylen))
-        logfd.flush()
         pos += mylen
-        mod_page = 0
-
-    #f.seek(offset)
-    #buf[:] = f.read(len(buf))
-    #buf[:] = np.arange(len(buf), dtype=np.uint8).tobytes()
+        mod_page = 0   # No need to cut the start position after the first page
 
 
 def raid5_stripes(ndisks, page_index, start=0):
