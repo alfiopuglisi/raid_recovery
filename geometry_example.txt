@@ -1,5 +1,6 @@
 
-# Warning: the actual image end is 7630885.3359375 MB that corresponds to 7814026584.0 KB
+# All lines starting with "#" are ignored.
+# The actual image end is 7630885.3359375 MB that corresponds to 7814026584.0 KB
 
 # id  RAID_idx   file img     start MB  end MB
 0        0       disk4a.img   0         4813759
