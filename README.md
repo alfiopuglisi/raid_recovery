@@ -25,38 +25,53 @@ taking note of their position.
 The final result was 48TB of non-backed up data and parity checksums 
 distributed among eight 8TB disks in a rather unknown pattern. Someone had
 enough foresight to make a low-level copy of each disk with the Unix "dd" utility,
-but since things were stil too boring, it came out that
+but since things were still too boring, it came out that
 the USB adapters used to generate disk image files were unreliable enough that
 disk copy was interrupted and restarted several times, ending up with each image file
-split into several multi-TB piece.
+split into several multi-TB pieces.
 
 This recovery tool and the subsequent NBD plugin for RAID virtual disks are the
 result of the frantic data recovering efforts.
 
 
+## Dependencies
+
+- `numpy`
+- `tqdm`
+
+Install them with pip or whatever:
+
+`pip install numpy tqdm`
+
 ## Syntax
 
-python recovery.py [common options] [action] [action options]
+```
+python recovery.py [common options] <action> [action options]
+```
 
 
 ## Common options
 
-- --nproc=N:  use N processors with Python multiprocessing, where applicable. Default 1 processor.
-- --image-file=file.img: work on image file "file.img"
-- --image-file-pattern="file?.img": work on the list of image files matching the bash pattern
-- --page-range=0,2-10-200,30: comma-separated list of page ranges to examine (python ranges, excludes the last element). Default is to examine the whole file.
-- -v, --verbose: verbose output
+- `--nproc=N`:  use N processors with Python multiprocessing, where applicable. Default 1 processor.
+- `--image-file=file.img`: work on image file "file.img"
+- `--image-file-pattern="file?.img"`: work on the list of image files matching the bash pattern. Use double quotes to prevent the shell from interpreting it directly.
+- `--page-range=0,2-10-200,30`: comma-separated list of page ranges to examine (python ranges, excludes the last element). Default is to examine the whole file.
+- `-v, --verbose`: verbose output
+- `-h, --help`: show detailed help
 
 ## Commands
 
-- pagesize: page size detection
-- raidset: disk image identification
-- paritycheck: parity check
-- order: disk image ordering in array
-- restore: RAID5 reconstruction
+- `pagesize`: page size detection
+- `raidset`: disk image identification
+- `paritycheck`: parity check
+- `order`: disk image ordering in array
+- `restore`: RAID5 reconstruction
 
 
 ### Page size detection
+
+Parameters:
+- `--array-size`: RAID array size (number of disks). Mandatory.
 
 RAID page sizes usually range from 64KB to 1024MB, depending on how the array was defined.
 This detection algorithm uses a heuristic based on ASCII files statistics: an ASCII file
@@ -76,6 +91,7 @@ Since this algorithm uses an heuristic, results are not guaranteed. In the worst
 image files can be examined with an hex editor to look for patterns.
 
 If the page size is known, this step can be skipped.
+
 
 
 ### Disk image identification
@@ -99,11 +115,18 @@ If results are ambiguous, just increase the page range and try again.
 If it is known which image files belonged to a certain RAID5 array, this step
 can be skipped.
 
+Parameters:
+- `--array-size`: RAID array size (number of disks). Mandatory.
+- `--page-size`: Page size in KB. Mandatory.
+- `--test-all`: Test all possible combinations instead of stopping at the first one. Recommended.
 
 ### Parity check
 
 As a data integrity check, a simple parity check can be run on the whole length
 of image files belonging to a single RAID5 array. The output is a simple pass/fail result.
+
+Parameters:
+- `--page-size`: Page size in KB. Mandatory.
 
 
 ### RAID5 sequence detection
@@ -118,6 +141,8 @@ same ASCII file patterns described in the page size detection step.
 Since this algorithm uses an heuristic, results are not guaranteed. In the worst case,
 image files can be examined with an hex editor to look for patterns.
 
+Parameters:
+- `--page-size`: Page size in KB. Mandatory.
 
 ### RAID5 data recontruction
 
@@ -127,6 +152,10 @@ correct sequence, and produce a single output file with the virtual drive conten
 
 The resulting file can be examined with fdisk and then mounted as a loopback device
 as if it was an image file of a single disk.
+
+Parameters:
+- `--page-size`: Page size in KB. Mandatory.
+- `--output-filename`: Output filename. Mandatory
 
 
 # RAID5 virtual disk
