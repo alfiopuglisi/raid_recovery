@@ -1,11 +1,11 @@
 
-# RAID5 data recovery tool
+# RAID5 data recovery tools
 
-Command line utility to recover RAID5 data from disk images, even
+Command line utilities to recover RAID5 data from disk images, even
 when the RAID superblock has been deleted and thus it is not possible
 to identify which disk image belongs to which RAID array, and in which order.
 
-Implements the following actions, in approximate logical order of recovery:
+The following actions are implemented, in approximate logical order of recovery:
 
 - page size detection
 - disk image identification
