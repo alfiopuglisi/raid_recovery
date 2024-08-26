@@ -3,7 +3,7 @@
 
 Command line utility to recover RAID5 data from disk images, even
 when the RAID superblock has been deleted and thus it is not possible
-to identify which disk image belongs to which RAID array, and in whcih order.
+to identify which disk image belongs to which RAID array, and in which order.
 
 Implements the following actions, in approximate logical order of recovery:
 
@@ -55,7 +55,7 @@ python recovery.py [common options] <action> [action options]
 - `--nproc=N`:  use N processors with Python multiprocessing, where applicable. Default 1 processor.
 - `--image-file=file.img`: work on image file "file.img"
 - `--image-file-pattern="file?.img"`: work on the list of image files matching the bash pattern. Use double quotes to prevent the shell from interpreting it directly.
-- `--page-range=0,2-10-200,30`: comma-separated list of page ranges to examine (python ranges, excludes the last element). Default is to examine the whole file.
+- `--page-range=0,2-10,200-300`: comma-separated list of page ranges to examine (python ranges, excludes the last element). Default is to examine the whole file.
 - `-v, --verbose`: verbose output
 - `-h, --help`: show detailed help
 
@@ -67,19 +67,32 @@ python recovery.py [common options] <action> [action options]
 - `order`: disk image ordering in array
 - `restore`: RAID5 reconstruction
 
+### RAID5 primer
+
+Wikipedia has a good image on how data is organized on RAID5 arrays:
+
+![RAID5 striping](https://upload.wikimedia.org/wikipedia/commons/6/64/RAID_5_new.png)
+
+Each long vertical cylinder is a disk, and every disk is divided into several *stripes*.
+The set of each corresponding stripe on all disks is a RAID5 *page*, and by convention
+the RAID5 page size is actually the stripe size.
+Note how the parity stripe (the one with all the XORs) changes position at each page.
+In the fifth page, not shown here, the pattern will start to repeat with the parity stripe
+on the fourth disk.
+
 
 ### Page size detection
 
 Parameters:
 - `--array-size`: RAID array size (number of disks). Mandatory.
 
-RAID page sizes usually range from 64KB to 1024MB, depending on how the array was defined.
+RAID page sizes usually range from 64KB to 1024MB, depending on how the array is defined at creation time.
 This detection algorithm uses a heuristic based on ASCII files statistics: an ASCII file
 will typically use only ~70 separate characters, while the parity calculation will fill
 almost the whole 7-bit space. Therefore there will be an alternating pattern of N pages
 with a reduced character count, and 1 page with an increased one.
 In order for this algorithm to work, a very long ASCII file needs to be present on disk,
-ideally a few MB at least. In addition to English text, Many other kind of text files
+ideally a few MB at least. In addition to English text, many other kind of text files
 can work: csv, logs, html. Only a single disk image needs to be examined.
 
 This algorithm can be quite slow so it supports the --nproc=N option for parallel
